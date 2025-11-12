@@ -375,3 +375,387 @@
 4. Corrected params → Edit Tool (retry)
 
 ---
+
+## 4. Loop Detection Pipeline
+
+**Назначение:** Обнаружение зацикливания агента в непродуктивном состоянии.
+
+**Когда активируется:**
+- Каждую итерацию агента (проверка tool calls и content)
+- После 30+ итераций в одном промпте (LLM-based проверка)
+
+**Компоненты:**
+- Loop Detection Service
+- Tool call tracking
+- Content streaming tracking
+- LLM-based diagnostic agent
+
+**Схема:**
+```
+┌─────────────────────────────────────────────────────────┐
+│  Every Agent Turn / Stream Event                        │
+└────────┬────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Loop Detection Service                                 │
+│  - Tool Call Loop Detection                             │
+│  - Content Loop Detection                               │
+│  - LLM-based Loop Detection (periodic)                  │
+└────────┬────────────────────────────────────────────────┘
+         │
+         ▼
+┌──────────────────────────────────┐
+│  1. Tool Call Loop Detection     │
+│                                  │
+│  Track:                          │
+│  - Hash of (tool_name + args)    │
+│  - Repetition count              │
+│                                  │
+│  Threshold: 5 identical calls    │
+│  → LOOP DETECTED                 │
+└──────────────────────────────────┘
+
+┌──────────────────────────────────┐
+│  2. Content Loop Detection       │
+│                                  │
+│  Track:                          │
+│  - Sliding window chunks (50ch)  │
+│  - Hash map of chunk positions   │
+│  - Reset on code blocks/tables   │
+│                                  │
+│  Threshold:                      │
+│  - 10 occurrences of same chunk  │
+│  - Within 5×chunk_size distance  │
+│  → LOOP DETECTED                 │
+└──────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────┐
+│  3. LLM-based Loop Detection (after 30+ turns)           │
+│                                                          │
+│  Trigger: turnsInCurrentPrompt >= 30 AND                │
+│          (currentTurn - lastCheckTurn) >= llmCheckInterval│
+│                                                          │
+│  Process:                                                │
+│  1. Get last 20 messages from history                    │
+│  2. Remove dangling function calls/responses             │
+│  3. Send to LLM with Loop Detection Prompt              │
+│     - Analyze for Repetitive Actions                     │
+│     - Analyze for Cognitive Loop                         │
+│     - Differentiate from legitimate progress             │
+│  4. Get JSON response:                                   │
+│     {                                                    │
+│       "unproductive_state_analysis": "...",              │
+│       "unproductive_state_confidence": 0.0-1.0           │
+│     }                                                    │
+│  5. If confidence > 0.9 → LOOP DETECTED                  │
+│  6. Adjust llmCheckInterval (5-15) based on confidence   │
+│     - High confidence → check more frequently (5)        │
+│     - Low confidence → check less frequently (15)        │
+└──────────────────────────────────────────────────────────┘
+         │
+         ▼
+    [Loop Detected?] ────No───> [Continue normally]
+         │
+         Yes
+         │
+         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Stop Agent Execution                                   │
+│  - Set loopDetected flag                                │
+│  - Log telemetry event                                  │
+│  - Return error to user                                 │
+│  - User can disable loop detection for session          │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Передача данных:**
+1. Stream Events → Loop Detector:
+   - `ToolCallRequest`: `{ name, args }`
+   - `Content`: текстовые chunks
+
+2. LLM Loop Check → LLM:
+   - Last 20 messages (trimmed)
+   - Task prompt: "analyze for loops"
+   - Return: `{ unproductive_state_analysis, unproductive_state_confidence }`
+
+---
+
+## 5. History Compression Pipeline
+
+**Назначение:** Сжатие истории разговора когда она становится слишком большой.
+
+**Когда активируется:**
+- История превышает максимальный размер контекстного окна
+- Настраивается автоматически системой
+
+**Компоненты:**
+- History manager
+- Compression agent (с Compression Prompt)
+
+**Схема:**
+```
+┌─────────────────────────────────────────────────────────┐
+│  History grows too large                                │
+│  - Approaching context window limit                     │
+│  - System triggers compression                          │
+└────────┬────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Compression Agent                                      │
+│  System Prompt: Compression Prompt                     │
+│                                                         │
+│  Input: Full conversation history                       │
+│                                                         │
+│  Task:                                                  │
+│  1. Think in private <scratchpad>                       │
+│     - Review user's goal                                │
+│     - Review agent actions                              │
+│     - Review tool outputs                               │
+│     - Review file modifications                         │
+│     - Identify essential information                    │
+│                                                         │
+│  2. Generate <state_snapshot> XML                       │
+└────────┬────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Generate State Snapshot (XML)                          │
+│                                                         │
+│  <state_snapshot>                                       │
+│    <overall_goal>                                       │
+│      User's high-level objective                        │
+│    </overall_goal>                                      │
+│                                                         │
+│    <key_knowledge>                                      │
+│      - Build command: npm run build                     │
+│      - Test command: npm test                           │
+│      - Key constraints and conventions                  │
+│    </key_knowledge>                                     │
+│                                                         │
+│    <file_system_state>                                  │
+│      - CWD: /path/to/project                            │
+│      - READ: package.json - confirmed deps              │
+│      - MODIFIED: src/foo.ts - refactored                │
+│      - CREATED: tests/new.test.ts                       │
+│    </file_system_state>                                 │
+│                                                         │
+│    <recent_actions>                                     │
+│      - Ran grep 'function' → 5 results                  │
+│      - Ran npm test → failed with error X               │
+│    </recent_actions>                                    │
+│                                                         │
+│    <current_plan>                                       │
+│      1. [DONE] Step 1                                   │
+│      2. [IN PROGRESS] Step 2                            │
+│      3. [TODO] Step 3                                   │
+│    </current_plan>                                      │
+│  </state_snapshot>                                      │
+└────────┬────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Replace Full History with Snapshot                     │
+│  - Original history cleared                             │
+│  - Snapshot becomes first user message                  │
+│  - Agent continues from this compressed state           │
+│  - ALL crucial details preserved in snapshot            │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Передача данных:**
+1. Full History → Compression Agent:
+   - Все сообщения в разговоре
+   - Tool calls и responses
+   - User messages и model responses
+
+2. Compression Agent → Compressed State:
+   - XML state_snapshot
+   - Максимально плотная информация
+   - Никакого conversational filler
+
+---
+
+## 6. Next Speaker Decision Pipeline
+
+**Назначение:** Определение кто должен говорить следующим: пользователь или модель.
+
+**Когда активируется:**
+- После каждого ответа модели
+- Определяет нужно ли продолжить автоматически или ждать пользователя
+
+**Компоненты:**
+- Next Speaker Checker
+- Curated history (без invalid turns)
+
+**Схема:**
+```
+┌─────────────────────────────────────────────────────────┐
+│  Model generates response                               │
+└────────┬────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Pre-checks (fast path)                                 │
+│                                                         │
+│  1. Last message is function_response?                  │
+│     → Model should speak next                           │
+│                                                         │
+│  2. Last model message has empty parts?                 │
+│     → Model should speak next (filler message)          │
+│                                                         │
+│  3. History is empty?                                   │
+│     → Cannot determine, return null                     │
+└────────┬────────────────────────────────────────────────┘
+         │
+         No pre-check match
+         │
+         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Next Speaker Checker Agent                             │
+│  Prompt: Next Speaker Checker Prompt                    │
+│                                                         │
+│  Input: Curated history (last model response visible)   │
+│                                                         │
+│  Analyze last model response ONLY:                      │
+│  - Content and structure                                │
+│  - Apply decision rules in order:                       │
+│                                                         │
+│    Rule 1: Model Continues                              │
+│    - Explicit next action stated                        │
+│    - Response incomplete/cut off                        │
+│    - Intended tool call didn't execute                  │
+│    → next_speaker = "model"                             │
+│                                                         │
+│    Rule 2: Question to User                             │
+│    - Ends with direct question to user                  │
+│    → next_speaker = "user"                              │
+│                                                         │
+│    Rule 3: Waiting for User                             │
+│    - Completed thought/statement/task                   │
+│    - Doesn't match Rule 1 or 2                          │
+│    - Implies pause for user input                       │
+│    → next_speaker = "user"                              │
+└────────┬────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Return Decision (JSON)                                 │
+│  {                                                      │
+│    "reasoning": "Explanation...",                       │
+│    "next_speaker": "user" | "model"                     │
+│  }                                                      │
+└────────┬────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Take Action                                            │
+│  - If "model": Continue agent turn immediately          │
+│  - If "user": Wait for user input                       │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Передача данных:**
+1. Curated History → Next Speaker Checker:
+   - История без invalid turns
+   - Последнее сообщение модели видно
+
+2. Next Speaker Checker → Decision:
+   - `{ reasoning: string, next_speaker: "user" | "model" }`
+
+---
+
+## 7. Tool Output Summarization Pipeline
+
+**Назначение:** Сжатие слишком длинных выводов инструментов для эффективной передачи модели.
+
+**Когда активируется:**
+- Вывод инструмента > maxOutputTokens (обычно 2000)
+- Автоматически для всех tool outputs
+
+**Компоненты:**
+- Summarizer
+- History context для контекстно-зависимой суммаризации
+
+**Схема:**
+```
+┌─────────────────────────────────────────────────────────┐
+│  Tool Execution Completes                               │
+│  Output: string (может быть очень длинным)              │
+└────────┬────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Check Output Length                                    │
+│  length > maxOutputTokens?                              │
+└────────┬────────────────────────────────────────────────┘
+         │
+         ▼
+    [Too long?] ────No───> [Return original output]
+         │
+         Yes
+         │
+         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Summarizer Agent                                       │
+│  Prompt: Tool Output Summarization Prompt              │
+│                                                         │
+│  Input:                                                 │
+│  - textToSummarize: Full tool output                    │
+│  - maxOutputTokens: Target length (e.g., 2000)          │
+│  - Context: Full conversation history                   │
+│                                                         │
+│  Rules:                                                 │
+│  1. Structural content (directory listing):             │
+│     - Use history to understand what user needs         │
+│     - Extract relevant information only                 │
+│                                                         │
+│  2. Text content:                                       │
+│     - Summarize main points                             │
+│                                                         │
+│  3. Shell command output:                               │
+│     - Summarize overall result                          │
+│     - Extract FULL stack trace → <error>...</error>     │
+│     - Extract warnings → <warning>...</warning>         │
+│     - Do NOT truncate errors/warnings                   │
+└────────┬────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Generate Summary                                       │
+│                                                         │
+│  Format:                                                │
+│  [Overall summarization of content]                     │
+│                                                         │
+│  <error>                                                │
+│  [Complete stack trace if present]                      │
+│  </error>                                               │
+│                                                         │
+│  <warning>                                              │
+│  [Complete warnings if present]                         │
+│  </warning>                                             │
+└────────┬────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Return Summarized Output to Model                      │
+│  - Compressed to ~maxOutputTokens                       │
+│  - Preserves critical information                       │
+│  - Errors/warnings complete and accessible              │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Передача данных:**
+1. Tool → Summarizer:
+   - `textToSummarize`: Полный вывод
+   - `maxOutputTokens`: Целевой размер
+   - История разговора (для контекста)
+
+2. Summarizer → Model:
+   - Сжатый текст с сохранением:
+     - Общей информации
+     - Полных stack traces в `<error>`
+     - Полных warnings в `<warning>`
+
+---
