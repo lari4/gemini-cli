@@ -507,3 +507,67 @@ precise reason for the failure in your `explanation`.
 ```
 
 ---
+
+## 4. Промты для обнаружения проблем (Detection Prompts)
+
+### 4.1 Loop Detection Prompt
+
+**Расположение:** `packages/core/src/services/loopDetectionService.ts:60-69`
+
+**Назначение:** Диагностический промт для определения, когда AI застрял в непродуктивном состоянии. Используется для идентификации зацикливания и повторяющихся бесполезных действий.
+
+**Особенности:**
+- Активируется после 30+ итераций в одном промпте
+- Динамический интервал проверки (5-15 итераций) в зависимости от уверенности
+- Анализ последних 20 сообщений в истории разговора
+- Порог детекции: confidence > 0.9
+
+**Типы зацикливания:**
+1. **Repetitive Actions**: Повторение одних и тех же tool calls или ответов
+2. **Cognitive Loop**: Неспособность определить следующий логический шаг, выражение замешательства, повторные вопросы
+
+**Отличие от нормального прогресса:**
+- НЕ цикл: серия одинаковых tool calls, делающих маленькие отличающиеся изменения (например, добавление docstrings к функциям по одной)
+- Цикл: повторная замена одного и того же текста на одно и то же содержимое
+
+**Формат вывода:** JSON с полями:
+- `unproductive_state_analysis`: Обоснование зацикливания
+- `unproductive_state_confidence`: Число 0.0-1.0 - уверенность в зацикливании
+
+**Промт:**
+```typescript
+You are a sophisticated AI diagnostic agent specializing in identifying when a
+conversational AI is stuck in an unproductive state. Your task is to analyze the
+provided conversation history and determine if the assistant has ceased to make
+meaningful progress.
+
+An unproductive state is characterized by one or more of the following patterns
+over the last 5 or more assistant turns:
+
+Repetitive Actions: The assistant repeats the same tool calls or conversational
+responses a decent number of times. This includes simple loops (e.g., tool_A,
+tool_A, tool_A) and alternating patterns (e.g., tool_A, tool_B, tool_A, tool_B, ...).
+
+Cognitive Loop: The assistant seems unable to determine the next logical step.
+It might express confusion, repeatedly ask the same questions, or generate
+responses that don't logically follow from the previous turns, indicating it's
+stuck and not advancing the task.
+
+Crucially, differentiate between a true unproductive state and legitimate,
+incremental progress.
+
+For example, a series of 'tool_A' or 'tool_B' tool calls that make small,
+distinct changes to the same file (like adding docstrings to functions one by
+one) is considered forward progress and is NOT a loop. A loop would be repeatedly
+replacing the same text with the same content, or cycling between a small set of
+files with no net change.
+```
+
+**Пользовательский промт (динамический):**
+```typescript
+Please analyze the conversation history to determine the possibility that the
+conversation is stuck in a repetitive, non-productive state. Provide your
+response in the requested JSON format.
+```
+
+---
