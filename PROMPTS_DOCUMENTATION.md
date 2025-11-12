@@ -715,3 +715,111 @@ in 'src/utils.js'?"
 ```
 
 ---
+
+## 6. Утилитарные промты (Utility Prompts)
+
+### 6.1 Tool Output Summarization Prompt
+
+**Расположение:** `packages/core/src/utils/summarizer.ts:43-54`
+
+**Назначение:** Промт для суммаризации вывода инструментов до заданного лимита токенов. Используется когда вывод команды/инструмента слишком длинный и нужно сократить его для эффективной передачи модели.
+
+**Особенности:**
+- Активируется когда длина текста превышает maxOutputTokens (по умолчанию 2000)
+- Контекстно-зависимая суммаризация с учетом истории разговора
+- Специальная обработка структурного контента, ошибок и предупреждений
+
+**Правила суммаризации:**
+1. **Структурный контент** (directory listing): Использовать историю для понимания контекста и извлечения нужной информации
+2. **Текстовый контент**: Суммаризировать текст
+3. **Вывод shell команд**: Суммаризация + полный stack trace ошибок в `<error></error>`, предупреждения в `<warning></warning>`
+
+**Формат вывода:** Текстовая строка с общей суммаризацией + полные stack traces ошибок/предупреждений
+
+**Промт:**
+```typescript
+Summarize the following tool output to be a maximum of {maxOutputTokens} tokens.
+The summary should be concise and capture the main points of the tool output.
+
+The summarization should be done based on the content that is provided. Here are
+the basic rules to follow:
+
+1. If the text is a directory listing or any output that is structural, use the
+   history of the conversation to understand the context. Using this context try
+   to understand what information we need from the tool output and return that
+   as a response.
+
+2. If the text is text content and there is nothing structural that we need,
+   summarize the text.
+
+3. If the text is the output of a shell command, use the history of the
+   conversation to understand the context. Using this context try to understand
+   what information we need from the tool output and return a summarization
+   along with the stack trace of any error within the <error></error> tags. The
+   stack trace should be complete and not truncated. If there are warnings, you
+   should include them in the summary within <warning></warning> tags.
+
+
+Text to summarize:
+"{textToSummarize}"
+
+Return the summary string which should first contain an overall summarization of
+text followed by the full stack trace of errors and warnings in the tool output.
+```
+
+---
+
+### 6.2 Next Speaker Checker Prompt
+
+**Расположение:** `packages/core/src/utils/nextSpeakerChecker.ts:13-17`
+
+**Назначение:** Определяет кто должен говорить следующим: пользователь или модель. Анализирует последний ответ модели для определения естественного потока разговора.
+
+**Особенности:**
+- Анализ только последнего ответа модели, не всей истории
+- Трёхуровневая система правил для принятия решения
+- Автоматическая обработка edge cases (пустые ответы, function responses)
+
+**Правила принятия решения (в порядке приоритета):**
+1. **Model Continues**: Модель говорит дальше если:
+   - Явно указано следующее действие ("Next, I will...", "Now I'll process...")
+   - Указан намеренный tool call который не выполнился
+   - Ответ незавершён (обрезан на полуслове)
+
+2. **Question to User**: Пользователь говорит если:
+   - Последний ответ заканчивается прямым вопросом к пользователю
+
+3. **Waiting for User**: Пользователь говорит если:
+   - Завершена мысль/утверждение/задача
+   - Не подходит под правила 1 и 2
+   - Подразумевается пауза для ожидания реакции пользователя
+
+**Формат вывода:** JSON с полями:
+- `reasoning`: Обоснование выбора
+- `next_speaker`: "user" или "model"
+
+**Промт:**
+```typescript
+Analyze *only* the content and structure of your immediately preceding response
+(your last turn in the conversation history). Based *strictly* on that response,
+determine who should logically speak next: the 'user' or the 'model' (you).
+
+**Decision Rules (apply in order):**
+
+1.  **Model Continues:** If your last response explicitly states an immediate
+    next action *you* intend to take (e.g., "Next, I will...", "Now I'll
+    process...", "Moving on to analyze...", indicates an intended tool call that
+    didn't execute), OR if the response seems clearly incomplete (cut off
+    mid-thought without a natural conclusion), then the **'model'** should speak
+    next.
+
+2.  **Question to User:** If your last response ends with a direct question
+    specifically addressed *to the user*, then the **'user'** should speak next.
+
+3.  **Waiting for User:** If your last response completed a thought, statement,
+    or task *and* does not meet the criteria for Rule 1 (Model Continues) or
+    Rule 2 (Question to User), it implies a pause expecting user input or
+    reaction. In this case, the **'user'** should speak next.
+```
+
+---
