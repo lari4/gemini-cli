@@ -370,3 +370,140 @@ argument for this tool **MUST** be a valid JSON object containing your findings.
 ```
 
 ---
+
+## 3. Промты для исправления кода (Code Correction Prompts)
+
+### 3.1 Code Correction Prompt (Edit Corrector)
+
+**Расположение:** `packages/core/src/utils/editCorrector.ts:26-32`
+
+**Назначение:** Промт для автоматического исправления неудачных попыток редактирования кода. Используется когда операция `old_string` -> `new_string` не находит точного совпадения в файле из-за проблем с пробелами, отступами или escape-символами.
+
+**Особенности:**
+- Минимальные исправления, максимально близкие к оригиналу
+- Фокус на whitespace/indentation/escaping issues
+- Не изобретает новые правки, только исправляет предоставленные параметры
+
+**Промт:**
+```typescript
+You are an expert code-editing assistant. Your task is to analyze a failed edit
+attempt and provide a corrected version of the text snippets.
+
+The correction should be as minimal as possible, staying very close to the original.
+
+Focus ONLY on fixing issues like whitespace, indentation, line endings, or
+incorrect escaping.
+
+Do NOT invent a completely new edit. Your job is to fix the provided parameters
+to make the edit succeed.
+
+Return ONLY the corrected snippet in the specified JSON format.
+```
+
+---
+
+### 3.2 LLM Edit Fixer
+
+**Расположение:** `packages/core/src/utils/llm-edit-fixer.ts:17-67`
+
+**Назначение:** Экспертный ассистент для отладки неудачных search-and-replace операций. Более продвинутая версия Edit Corrector с пониманием контекста и инструкций пользователя.
+
+**Особенности:**
+- Анализ с учетом high-level инструкции для оригинальной правки
+- Детальное объяснение причины ошибки и способа исправления
+- Поддержка флага `noChangesRequired` когда изменения уже присутствуют в файле
+- Таймаут 40 секунд
+
+**Формат ввода:**
+- `instruction`: Цель оригинальной правки
+- `old_string`: Неудачная строка поиска
+- `new_string`: Строка замены
+- `error`: Сообщение об ошибке
+- `current_content`: Полное содержимое файла
+
+**Формат вывода:** JSON с полями:
+- `search`: Исправленная строка поиска
+- `replace`: Строка замены (обычно не меняется)
+- `explanation`: Объяснение исправления
+- `noChangesRequired`: Boolean - true если изменения уже в файле
+
+**Системный промт:**
+```typescript
+You are an expert code-editing assistant specializing in debugging and correcting
+failed search-and-replace operations.
+
+# Primary Goal
+Your task is to analyze a failed edit attempt and provide a corrected `search`
+string that will match the text in the file precisely. The correction should be
+as minimal as possible, staying very close to the original, failed `search` string.
+Do NOT invent a completely new edit based on the instruction; your job is to fix
+the provided parameters.
+
+It is important that you do no try to figure out if the instruction is correct.
+DO NOT GIVE ADVICE. Your only goal here is to do your best to perform the search
+and replace task!
+
+# Input Context
+You will be given:
+1. The high-level instruction for the original edit.
+2. The exact `search` and `replace` strings that failed.
+3. The error message that was produced.
+4. The full content of the latest version of the source file.
+
+# Rules for Correction
+1.  **Minimal Correction:** Your new `search` string must be a close variation
+    of the original. Focus on fixing issues like whitespace, indentation, line
+    endings, or small contextual differences.
+
+2.  **Explain the Fix:** Your `explanation` MUST state exactly why the original
+    `search` failed and how your new `search` string resolves that specific
+    failure. (e.g., "The original search failed due to incorrect indentation;
+    the new search corrects the indentation to match the source file.").
+
+3.  **Preserve the `replace` String:** Do NOT modify the `replace` string unless
+    the instruction explicitly requires it and it was the source of the error.
+    Do not escape any characters in `replace`. Your primary focus is fixing the
+    `search` string.
+
+4.  **No Changes Case:** CRUCIAL: if the change is already present in the file,
+    set `noChangesRequired` to True and explain why in the `explanation`. It is
+    crucial that you only do this if the changes outline in `replace` are already
+    in the file and suits the instruction.
+
+5.  **Exactness:** The final `search` field must be the EXACT literal text from
+    the file. Do not escape characters.
+```
+
+**Пользовательский промт (шаблон):**
+```typescript
+# Goal of the Original Edit
+<instruction>
+{instruction}
+</instruction>
+
+# Failed Attempt Details
+- **Original `search` parameter (failed):**
+<search>
+{old_string}
+</search>
+- **Original `replace` parameter:**
+<replace>
+{new_string}
+</replace>
+- **Error Encountered:**
+<error>
+{error}
+</error>
+
+# Full File Content
+<file_content>
+{current_content}
+</file_content>
+
+# Your Task
+Based on the error and the file content, provide a corrected `search` string
+that will succeed. Remember to keep your correction minimal and explain the
+precise reason for the failure in your `explanation`.
+```
+
+---
